@@ -1,0 +1,148 @@
+#!/bin/sh
+
+if [ $# -ne 1 ];then
+        echo "wrong format: ##sh salt.sh "master ip"
+              ##"master ip" is the new master ip you want add"
+        exit
+fi
+##sh salt.sh "master ip"
+##$1 is new master ip
+
+IP=$1
+new_master="master: $IP"
+
+##get kernel version 版本
+
+RELEASEVER=$(rpm -q --qf "%{VERSION}" $(rpm -q --whatprovides redhat-release))
+
+VERSION=`cat /etc/issue | grep '6.'`
+if [ "$VERSION" == "" ];then
+    VERSION='centos7'
+else
+    VERSION='centos6'
+fi
+
+
+
+##check-master
+function check_master()
+{
+num_master=`rpm -qa salt-master |wc -l`
+if [ $num_master = 1 ] ;then
+   log=`echo Attention: salt-master has been installed,check again !!!`
+fi
+}
+
+function install_minion()
+{
+#yum install epel-release -y
+yum clean all;
+yum install salt-minion -y
+rm -rvf /etc/salt/pki/minion/*
+cp -an /etc/salt/minion /etc/salt/minion.bak
+cat > /etc/salt/minion <<EOF   
+master: $IP    
+id: $HOSTNAME
+recon_max: 30000
+recon_default: 1000
+recon_randomize: True
+EOF
+service salt-minion restart
+chkconfig  salt-minion on
+}
+
+
+function add_minion()
+{
+echo salt_minion is not install,and it will be install in 5s
+sleep 5
+install_minion
+num_minion=`rpm -qa salt-minion |wc -l`
+if [ $num_minion -eq 0 ]
+then
+    result_status=1   #yum install fail,check yum config;
+else
+    if_new_master=`grep $IP /etc/salt/minion |wc -l`
+    if [ $if_new_master -eq 0 ]
+    then
+        result_status=2   #add master to config fail,check minion config;
+    else
+        result_status=0   #success;
+    fi
+fi
+return $result_status
+}
+
+function modify_minion_config()
+{
+cp -an /etc/salt/minion /etc/salt/minion_bas.bak
+count=`cat /etc/salt/minion |grep -i '^master' |awk -F: '{print $2}'`
+if [ -z $count ]
+then
+    M=`cat /etc/salt/minion |grep -i '^master:'`
+    new_master=$IP
+    sed -i "/master:/a\  - $IP" /etc/salt/minion
+else
+     M=`cat /etc/salt/minion |grep -i '^master'`
+     old_master=`cat /etc/salt/minion |grep -i '^master' |awk -F: '{print $2}'`
+     new_master=$IP
+     sed -i "/$M/a\  -$old_master" /etc/salt/minion
+     sed -i "/$M/a\  - $new_master" /etc/salt/minion
+     sed -i "s/$M/master:/" /etc/salt/minion
+#    grep $IP /etc/salt/minion || sed -i "/^master: /a\  - $IP" /etc/salt/minion
+fi
+
+if_new_master=`grep $IP /etc/salt/minion |wc -l`
+
+if [ $if_new_master -eq 0 ]
+then
+    result_status=3   #modify config fail,check minion config;
+else
+    result_status=0   #modify config success;
+fi
+return $result_status
+}
+
+
+##check-minion
+function check_minion()
+{
+num_minion=`rpm -qa salt-minion |wc -l`
+if [ $num_minion -eq 0 ]
+then
+    add_minion
+    status=$?
+else
+    modify_minion_config
+    status=$?
+fi
+return $status
+}
+
+
+check_master
+
+if [ $RELEASEVER == 7 ];then
+##OS:centos7
+    check_minion
+    finish_status=$?
+    systemctl restart salt-minion.service
+else
+###OS:centos6
+    check_minion
+    finish_status=$?
+    service salt-minion restart
+fi
+
+if [ $finish_status == 0 ];then
+    status="success"
+elif [ $finish_status == 1 ];then
+    status="yum_install_fail"
+elif [ $finish_status == 2 ];then
+    status="add_config_fail"
+else
+    status="modify_config_fail"
+fi
+
+result="result: $HOSTNAME $status"
+echo $result
